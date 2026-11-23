@@ -9,6 +9,9 @@ def test_dags_parse_with_an_inclusive_last_start_and_declared_pools(monkeypatch)
     sdk = pytest.importorskip("airflow.sdk")
     from airflow.serialization.serialized_objects import DagSerialization
 
+    from partner_delivery.contract import load_manifest
+    from partner_delivery.scheduling import select_release
+
     monkeypatch.setenv("PARTNER_DELIVERY_CATCHUP", "true")
     monkeypatch.setenv("PARTNER_DELIVERY_LAST_START", "2026-01-12")
     dag_file = Path(__file__).resolve().parents[1] / "dags" / "partner_delivery.py"
@@ -25,6 +28,11 @@ def test_dags_parse_with_an_inclusive_last_start_and_declared_pools(monkeypatch)
     assert first.data_interval.end == datetime(2026, 1, 12, 22, tzinfo=UTC)
     assert first.run_after == first.data_interval.end
     assert scheduled.next_dagrun_info(last_automated_run_info=first) is None
+    release = select_release("scheduled", {}, first.data_interval.start, first.data_interval.end)
+    fixture_root = dag_file.parents[1] / "fixtures"
+    assert (
+        load_manifest(fixture_root, release.key.business_date, release.key.revision).revision == 1
+    )
 
     tasks = producer.task_dict
     assert set(tasks) == {"resolve_release", "validate_p1", "validate_p2", "publish_release"}
