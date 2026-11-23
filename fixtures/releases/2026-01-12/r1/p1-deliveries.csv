@@ -1,0 +1,4 @@
+business_date,partner_id,shipment_id,line_id,warehouse_id,sku,units,delivered_at_utc
+2026-01-12,p1,SHIP-P1-CPT,L1,CPT,SKU1,3,2026-01-11T22:05:00Z
+2026-01-12,p1,SHIP-P1-JNB,L1,JNB,SKU2,2,2026-01-12T09:20:00Z
+2026-01-12,p1,SHIP-P1-CPT,L1,CPT,SKU1,3,2026-01-11T22:05:00Z

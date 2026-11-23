@@ -1,0 +1,31 @@
+{
+  "business_date": "2026-01-12",
+  "partners": {
+    "p1": {
+      "deliveries": {
+        "path": "releases/2026-01-12/r1/p1-deliveries.csv",
+        "row_count": 3,
+        "sha256": "20727f2af5f03bf6ee4a1abb15bb25873fa61bb86f63f6c1cda1b40036b08a23"
+      },
+      "inventory": {
+        "path": "releases/2026-01-12/r1/p1-inventory.csv",
+        "row_count": 2,
+        "sha256": "1afcf670d0e63e6c3fb00929ee536ee09ed05059ba9bc9778d4d5d5725bd5032"
+      }
+    },
+    "p2": {
+      "deliveries": {
+        "path": "releases/2026-01-12/r1/p2-deliveries.csv",
+        "row_count": 1,
+        "sha256": "bf27f982b10cbd809ac4bca681fe90c10b69c86de0c48cfd86379619c9fe864c"
+      },
+      "inventory": {
+        "path": "releases/2026-01-12/r1/p2-inventory.csv",
+        "row_count": 1,
+        "sha256": "c6278b50ee44373ad8530a80232738f6b3dfe665a772e6efc287aac7a7357529"
+      }
+    }
+  },
+  "revision": 1,
+  "schema_version": 1
+}

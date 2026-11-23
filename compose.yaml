@@ -1,0 +1,143 @@
+# Adapted from the Apache Airflow 3.4.0 Compose quick start (Apache-2.0).
+x-airflow-common: &airflow-common
+  image: partner-delivery-airflow:3.4.0
+  build:
+    context: .
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg://airflow_meta:${PARTNER_METADATA_PASSWORD:?Run bootstrap}@postgres/airflow_meta
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg://airflow_meta:${PARTNER_METADATA_PASSWORD:?Run bootstrap}@postgres/airflow_meta
+    AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+    AIRFLOW__CELERY__WORKER_CONCURRENCY: '2'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__CORE__FERNET_KEY: ${PARTNER_FERNET_KEY:?Run bootstrap}
+    AIRFLOW__CORE__INTERNAL_API_SECRET_KEY: ${PARTNER_AIRFLOW_API_SECRET:?Run bootstrap}
+    AIRFLOW__API__SECRET_KEY: ${PARTNER_AIRFLOW_API_SECRET:?Run bootstrap}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${PARTNER_AIRFLOW_JWT_SECRET:?Run bootstrap}
+    AIRFLOW__API_AUTH__JWT_ISSUER: airflow
+    AIRFLOW__API__WORKERS: '1'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: '2'
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: '10'
+    AIRFLOW__DAG_PROCESSOR__MIN_FILE_PROCESS_INTERVAL: '10'
+    AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES: '1'
+    PARTNER_DELIVERY_DSN: postgresql://delivery_app:${PARTNER_APP_PASSWORD:?Run bootstrap}@postgres/delivery_app
+    PARTNER_DELIVERY_FIXTURE_ROOT: /opt/airflow/fixtures
+    PARTNER_DELIVERY_CATCHUP: ${PARTNER_DELIVERY_CATCHUP:-false}
+    PARTNER_DELIVERY_LAST_START: ${PARTNER_DELIVERY_LAST_START:-}
+    PARTNER_DELIVERY_ENABLE_TEST_FAULTS: ${PARTNER_DELIVERY_ENABLE_TEST_FAULTS:-false}
+    PARTNER_AIRFLOW_USER: ${PARTNER_AIRFLOW_USER:?Run bootstrap}
+    PARTNER_AIRFLOW_PASSWORD: ${PARTNER_AIRFLOW_PASSWORD:?Run bootstrap}
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - ./src:/opt/airflow/src:ro
+    - ./db:/opt/airflow/db:ro
+    - ./scripts:/opt/airflow/scripts:ro
+    - ./tests:/opt/airflow/tests:ro
+    - ${PARTNER_FIXTURE_BIND:-./fixtures}:/opt/airflow/fixtures:ro
+    - airflow-logs:/opt/airflow/logs
+  user: "50000:0"
+  depends_on: &runtime-services
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16@sha256:3950ad7c3148ca2175ef1b6c36c9efbf78957ae8fbe8b3a5d7c35af50500382f
+    environment:
+      POSTGRES_USER: airflow_meta
+      POSTGRES_PASSWORD: ${PARTNER_METADATA_PASSWORD:?Run bootstrap}
+      POSTGRES_DB: airflow_meta
+      PARTNER_APP_PASSWORD: ${PARTNER_APP_PASSWORD:?Run bootstrap}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/create-app.sh:/docker-entrypoint-initdb.d/20-create-app.sh:ro
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -d, airflow_meta, -U, airflow_meta]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  redis:
+    image: redis:7.2-bookworm@sha256:5b816bb37d9707a70f10ef5002ecf8ee431750d397010fc4314c93dca887962f
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: [/bin/bash, /opt/airflow/scripts/init.sh]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "127.0.0.1:${AIRFLOW_HTTP_PORT:-8016}:8080"
+    healthcheck:
+      test: [CMD, curl, --fail, http://localhost:8080/api/v2/monitor/health]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: [CMD, curl, --fail, http://localhost:8974/health]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: [CMD-SHELL, 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 8s
+      timeout: 6s
+      retries: 35
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    environment:
+      <<: *airflow-env
+      DUMB_INIT_SETSID: '0'
+    depends_on:
+      <<: *runtime-services
+      airflow-apiserver:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 8s
+      timeout: 6s
+      retries: 35
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: [CMD-SHELL, 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 8s
+      timeout: 6s
+      retries: 35
+
+volumes:
+  airflow-logs:
+  postgres-data:

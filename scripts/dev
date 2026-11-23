@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+command="${1:-help}"
+if [[ $# -gt 0 ]]; then shift; fi
+probe() {
+  uv run --locked python tests/integration/probe.py "$@"
+}
+case "$command" in
+  bootstrap)
+    uv sync --locked
+    probe bootstrap
+    ;;
+  checks)
+    uv run --locked ruff format --check .
+    uv run --locked ruff check .
+    uv run --locked mypy src
+    uv run --locked python -m compileall -q dags src
+    uv run --locked pytest "$@"
+    ;;
+  test)
+    ./scripts/dev checks
+    for scenario in scheduled backfill corrupted; do
+      probe "$scenario"
+    done
+    ;;
+  demo)
+    probe scheduled
+    ;;
+  eval)
+    for scenario in scheduled backfill corrupted; do
+      probe "$scenario"
+    done
+    uv run --locked python -m partner_delivery.report
+    ;;
+  probe)
+    probe "$@"
+    ;;
+  *)
+    echo 'Usage: ./scripts/dev {bootstrap|checks|test|demo|eval|probe}'
+    [[ "$command" == help ]]
+    ;;
+esac

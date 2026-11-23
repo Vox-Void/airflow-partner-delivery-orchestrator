@@ -1,0 +1,3 @@
+business_date,partner_id,warehouse_id,sku,on_hand,reserved
+2026-01-12,p1,CPT,SKU1,12,2
+2026-01-12,p1,JNB,SKU2,8,1

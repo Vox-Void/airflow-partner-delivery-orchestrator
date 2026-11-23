@@ -1,0 +1,43 @@
+name: Verify partner delivery workflows
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  domain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install uv
+        run: pipx install uv==0.13.9
+      - name: Check validation rules and fixtures
+        run: |
+          ./scripts/dev checks
+          uv run --locked python -m partner_delivery.fixtures
+          git diff --exit-code -- fixtures
+
+  scheduler:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 17
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [scheduled, backfill, corrupted]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install uv
+        run: pipx install uv==0.13.9
+      - name: Run Airflow with the scheduler and worker
+        run: ./scripts/dev probe ${{ matrix.scenario }}
+      - name: Upload reconciled evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: airflow-${{ matrix.scenario }}
+          path: artifacts/${{ matrix.scenario }}.json
+          if-no-files-found: error
