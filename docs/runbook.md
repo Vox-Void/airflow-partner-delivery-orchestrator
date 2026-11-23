@@ -16,7 +16,7 @@ The consumer usually starts from the producer's asset. For a committed release t
 
 - Run `./scripts/dev checks` to inspect formatting, types, fixtures and pure validation rules. PostgreSQL integration tests require `PARTNER_DELIVERY_TEST_DSN`, which should point to a disposable application database. The isolated corrupted scenario also runs those tests inside the pinned stack.
 - Run `./scripts/dev probe scheduled` for the actual scheduled interval, asset-triggered report, post-commit retry, correction and manual consumer recovery.
-- Run `./scripts/dev probe backfill` for the three-day dry run, the six successful DagRuns after reprocessing, worker intervals and unchanged data digest.
+- Run `./scripts/dev probe backfill` for the three-day dry run, both completed backfill records, worker intervals and the unchanged data digest. Airflow 3.4 reuses the three original DagRun IDs when it reprocesses these intervals. The probe checks that each run produces a new asset event during the second pass.
 - Run `./scripts/dev probe corrupted` for the permanent checksum failure and unchanged visible state.
 - Run `./scripts/dev eval` to produce the three JSON reports and one Markdown summary in `artifacts/`.
 
@@ -27,6 +27,11 @@ Each probe creates its own Compose project and volume. It polls the Airflow REST
 The probe configures the end of the historical schedule separately from the normal deployment. It uses the native CLI with an explicit business-date range, a backfill concurrency of two and revision one. The dry run converts the resulting logical datetimes to Johannesburg dates before verifying all three slots.
 
 The stock figures in `fixtures/goldens.json` are calculated by hand. Start with these when a report differs, then inspect the file checksums, staged digests and Airflow task attempts.
+
+## What showed up in the first scheduler run
+
+- Airflow supplied its interval boundaries as Pendulum timestamps. The selected business date now becomes a standard Python date, which the manifest reader accepts and uses for the release path.
+- Reprocessing creates a new backfill record and clears the existing DagRuns. The probe waits for the new backfill to finish and matches new asset IDs to the same three producer runs.
 
 ## Runtime source
 

@@ -47,7 +47,7 @@ def interval_business_date(start: datetime | None, end: datetime | None) -> date
         raise InputError(
             "INVALID_INTERVAL", "The interval must span adjacent Johannesburg midnights."
         )
-    return local_start.date()
+    return date(local_start.year, local_start.month, local_start.day)
 
 
 def select_release(

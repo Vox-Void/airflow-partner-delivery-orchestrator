@@ -102,6 +102,8 @@ class Stack:
         return result.stdout if check else result.stdout + result.stderr
 
     def redact(self, output: str) -> str:
+        if self.token:
+            output = output.replace(self.token, "[redacted]")
         for key, value in self.values.items():
             if key != "PARTNER_AIRFLOW_USER" and value:
                 output = output.replace(value, "[redacted]")
@@ -222,6 +224,20 @@ class Stack:
             return None
 
         return until(f"{count} reporting receipts", inspect)
+
+    def print_failures(self) -> None:
+        if not self.token:
+            return
+        for dag in (DAILY, REPORT):
+            for run in self.runs(dag):
+                run_id = run["dag_run_id"]
+                for task in self.tasks(dag, run_id):
+                    if task["state"] != "failed":
+                        continue
+                    task_id = task["task_id"]
+                    print(f"Failed task {dag}/{run_id}/{task_id}", file=sys.stderr)
+                    detail = self.task_log(dag, run_id, task_id, task["try_number"])
+                    print(self.redact(detail[-6000:]), file=sys.stderr)
 
 
 def timestamp(value: str) -> datetime:
@@ -409,7 +425,11 @@ def scheduled(stack: Stack) -> dict[str, Any]:
     }
 
 
-def expect_consumed(stack: Stack, producer_ids: set[str]) -> list[dict[str, Any]]:
+def expect_consumed(
+    stack: Stack,
+    producer_ids: set[str],
+    previous_events: set[int] | None = None,
+) -> list[dict[str, Any]]:
     def consumed() -> list[dict[str, Any]] | None:
         event_batches = []
         for run in stack.runs(REPORT):
@@ -418,11 +438,50 @@ def expect_consumed(stack: Stack, producer_ids: set[str]) -> list[dict[str, Any]
                 continue
             run_id = quote(run["dag_run_id"], safe="")
             path = f"/api/v2/dags/{REPORT}/dagRuns/{run_id}/upstreamAssetEvents"
-            event_batches.extend(stack.api(path)["asset_events"])
+            event_batches.extend(
+                event
+                for event in stack.api(path)["asset_events"]
+                if not previous_events or event["id"] not in previous_events
+            )
         actual = {event["source_run_id"] for event in event_batches}
-        return event_batches if actual == producer_ids else None
+        if actual == producer_ids:
+            require(len(event_batches) == len(producer_ids), "Unexpected repeated asset event")
+            return event_batches
+        return None
 
     return until(f"asset consumption for {len(producer_ids)} releases", consumed)
+
+
+def wait_backfill(stack: Stack, behavior: str) -> tuple[int, list[dict[str, Any]]]:
+    def inspect() -> tuple[int, list[dict[str, Any]]] | None:
+        runs = stack.runs(DAILY)
+        require(
+            all(row["run_type"] == "backfill" for row in runs),
+            "Unexpected scheduled run during backfill",
+        )
+        require(all(row["state"] != "failed" for row in runs), "An Airflow backfill run failed")
+        records = stack.api(f"/api/v2/backfills?dag_id={DAILY}")["backfills"]
+        batch = next((row for row in records if row["reprocess_behavior"] == behavior), None)
+        if batch is None or batch["completed_at"] is None:
+            return None
+        batch_id = int(batch["id"])
+        slots = stack.api(f"/api/v2/backfills/{batch_id}/dag_runs")["backfill_dag_runs"]
+        require(batch["max_active_runs"] == 2, "Unexpected backfill concurrency")
+        require(
+            len(slots) == 3
+            and all(
+                row["exception_reason"] is None and row["dag_run_state"] == "success"
+                for row in slots
+            ),
+            "Backfill did not run all three slots successfully",
+        )
+        require(
+            {slot["dag_run_id"] for slot in slots} == {run["dag_run_id"] for run in runs},
+            "Backfill records do not match the producer runs",
+        )
+        return batch_id, runs
+
+    return until(f"completed {behavior} backfill", inspect, timeout=240)
 
 
 def backfill(stack: Stack) -> dict[str, Any]:
@@ -458,20 +517,10 @@ def backfill(stack: Stack) -> dict[str, Any]:
     ]
     require(dates == list(DAYS), f"Unexpected Airflow dry-run slots {dates}")
 
-    def finished(expected_count: int) -> list[dict[str, Any]] | None:
-        runs = stack.runs(DAILY)
-        require(
-            all(row["run_type"] == "backfill" for row in runs),
-            "Unexpected scheduled run during backfill",
-        )
-        require(all(row["state"] != "failed" for row in runs), "An Airflow backfill run failed")
-        if len(runs) == expected_count and all(row["state"] == "success" for row in runs):
-            return runs
-        return None
-
     stack.compose(*args, "--reprocess-behavior", "none")
-    first = until("three historical DagRuns", lambda: finished(3), timeout=240)
-    expect_consumed(stack, {row["dag_run_id"] for row in first})
+    first_id, first = wait_backfill(stack, "none")
+    producer_ids = {row["dag_run_id"] for row in first}
+    first_events = expect_consumed(stack, producer_ids)
     before = stack.wait_receipts(3)
     require(
         len(before["curated_rows"]) == 9 and len(before["reports"]) == 6,
@@ -504,10 +553,12 @@ def backfill(stack: Stack) -> dict[str, Any]:
         "Partner validations overlapped in the one-slot pool",
     )
     stack.compose(*args, "--reprocess-behavior", "completed")
-    second = until(
-        "six historical DagRuns including reprocessing", lambda: finished(6), timeout=240
+    second_id, second = wait_backfill(stack, "completed")
+    require(
+        first_id != second_id and {row["dag_run_id"] for row in second} == producer_ids,
+        "Airflow reprocessing did not reuse the original DagRuns",
     )
-    events = expect_consumed(stack, {row["dag_run_id"] for row in second})
+    events = expect_consumed(stack, producer_ids, {event["id"] for event in first_events})
     after = stack.wait_receipts(3)
     require(
         after["canonical_digest"] == before["canonical_digest"],
@@ -519,6 +570,8 @@ def backfill(stack: Stack) -> dict[str, Any]:
     )
     return {
         "dry_run_dates": dates,
+        "initial_backfill_id": first_id,
+        "reprocess_backfill_id": second_id,
         "runs": [run_evidence(row) for row in second],
         "read_intervals": [
             {key: item[key] for key in ("task_id", "pool", "start_date", "end_date")}
@@ -527,7 +580,7 @@ def backfill(stack: Stack) -> dict[str, Any]:
         "digest_before_reprocess": before["canonical_digest"],
         "digest_after_reprocess": after["canonical_digest"],
         "database": after,
-        "asset_event_count": len(events),
+        "asset_event_count": len(first_events) + len(events),
     }
 
 
@@ -606,6 +659,10 @@ def main() -> int:
         )
         print(f"Airflow {args.scenario} evidence saved to artifacts/{args.scenario}.json")
     except Exception:
+        try:
+            stack.print_failures()
+        except (HTTPError, OSError, RuntimeError, ValueError) as log_error:
+            print(f"Could not collect task logs: {stack.redact(str(log_error))}", file=sys.stderr)
         print(stack.redact(stack.compose("ps", "-a", check=False)), file=sys.stderr)
         print(stack.redact(stack.compose("logs", "--tail", "55", check=False)), file=sys.stderr)
         raise
