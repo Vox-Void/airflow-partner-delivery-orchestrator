@@ -248,3 +248,11 @@ def test_csv_validation_runs_after_manifest_resolution(fixture_root: Path) -> No
     (fixture_root / spec.partners["p1"].deliveries.path).unlink()
     assert load_manifest(fixture_root, FIRST_DATE, 1).digest == spec.digest
     assert_rejected(fixture_root, "MISSING_FILE")
+
+
+def test_directory_at_source_path_is_rejected_as_a_missing_file(fixture_root: Path) -> None:
+    spec = load_manifest(fixture_root, FIRST_DATE, 1)
+    path = fixture_root / spec.partners["p1"].deliveries.path
+    path.unlink()
+    path.mkdir()
+    assert_rejected(fixture_root, "MISSING_FILE")

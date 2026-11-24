@@ -134,8 +134,11 @@ def _inside(root: Path, relative: str) -> Path:
 
 
 def _read(root: Path, relative: str, limit: int) -> bytes:
+    path = _inside(root, relative)
+    if not path.is_file():
+        raise InputError("MISSING_FILE", f"Could not open source file {relative}.")
     try:
-        with _inside(root, relative).open("rb") as file:
+        with path.open("rb") as file:
             data = file.read(limit + 1)
     except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as error:
         raise InputError("MISSING_FILE", f"Could not open source file {relative}.") from error

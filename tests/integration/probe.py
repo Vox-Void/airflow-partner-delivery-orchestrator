@@ -239,6 +239,38 @@ class Stack:
                     detail = self.task_log(dag, run_id, task_id, task["try_number"])
                     print(self.redact(detail[-6000:]), file=sys.stderr)
 
+    def print_diagnostics(self) -> None:
+        try:
+            self.print_failures()
+        except Exception as error:
+            print(f"Could not collect task logs: {self.redact(str(error))}", file=sys.stderr)
+        for command in (("ps", "-a"), ("logs", "--tail", "55")):
+            try:
+                print(self.redact(self.compose(*command, check=False, timeout=20)), file=sys.stderr)
+            except (OSError, subprocess.SubprocessError) as error:
+                print(
+                    f"Could not collect Compose {command[0]}: {self.redact(str(error))}",
+                    file=sys.stderr,
+                )
+
+
+def run_isolated(stack: Stack, scenario: Callable[[Stack], dict[str, Any]]) -> dict[str, Any]:
+    failed = False
+    try:
+        health = stack.start(build=True)
+        return {"health": health, **scenario(stack)}
+    except BaseException:
+        failed = True
+        stack.print_diagnostics()
+        raise
+    finally:
+        try:
+            stack.compose("down", "--volumes", "--remove-orphans")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            if not failed:
+                raise
+            print(f"Could not remove Compose project: {stack.redact(str(error))}", file=sys.stderr)
+
 
 def timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -643,31 +675,15 @@ def main() -> int:
         options["PARTNER_FIXTURE_BIND"] = str(fixtures)
     stack = Stack(scratch.name, scratch / "probe.env", options)
     scenarios = {"scheduled": scheduled, "backfill": backfill, "corrupted": corrupted}
-    try:
-        health = stack.start(build=True)
-        details = scenarios[args.scenario](stack)
-        report = {
-            "version": 1,
-            "app_commit": os.environ.get("GITHUB_SHA"),
-            "engine": "Airflow 3.4.0",
-            "scenario": args.scenario,
-            "health": health,
-            **details,
-        }
-        (ARTIFACTS / f"{args.scenario}.json").write_text(
-            json.dumps(report, indent=2) + "\n", "utf-8"
-        )
-        print(f"Airflow {args.scenario} evidence saved to artifacts/{args.scenario}.json")
-    except Exception:
-        try:
-            stack.print_failures()
-        except (HTTPError, OSError, RuntimeError, ValueError) as log_error:
-            print(f"Could not collect task logs: {stack.redact(str(log_error))}", file=sys.stderr)
-        print(stack.redact(stack.compose("ps", "-a", check=False)), file=sys.stderr)
-        print(stack.redact(stack.compose("logs", "--tail", "55", check=False)), file=sys.stderr)
-        raise
-    finally:
-        stack.compose("down", "--volumes", "--remove-orphans", timeout=180, check=False)
+    report = {
+        "version": 1,
+        "app_commit": os.environ.get("GITHUB_SHA"),
+        "engine": "Airflow 3.4.0",
+        "scenario": args.scenario,
+        **run_isolated(stack, scenarios[args.scenario]),
+    }
+    (ARTIFACTS / f"{args.scenario}.json").write_text(json.dumps(report, indent=2) + "\n", "utf-8")
+    print(f"Airflow {args.scenario} evidence saved to artifacts/{args.scenario}.json")
     return 0
 
 
